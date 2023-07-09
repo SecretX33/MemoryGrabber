@@ -2,9 +2,6 @@
 #![allow(dead_code)]
 
 use std::os::raw::c_void;
-use std::ptr;
-use std::rc::Rc;
-use std::slice::Iter;
 use anyhow::{bail, Result};
 use scopeguard::{defer, guard, ScopeGuard};
 use System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
@@ -37,8 +34,7 @@ fn main() -> Result<()> {
     };
 
     if read_memory_successfully {
-        let valid_buffer_contents = strip_trailing_nulls(buffer[..bytes_read].iter());
-        let text = String::from_utf16_lossy(&valid_buffer_contents);
+        let text = String::from_utf16_lossy(strip_trailing_nulls(&buffer[..bytes_read]));
         println!("Memory content: {}", text);
     } else {
         println!("Failed to read process memory. Error: {:?}", unsafe { GetLastError() });
@@ -47,7 +43,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn open_process(process_id: u32) -> Result<RcHandle> {
+fn open_process(process_id: u32) -> Result<ManagedHandle> {
     let process_handle = unsafe {
         OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?
     };
@@ -57,7 +53,7 @@ fn open_process(process_id: u32) -> Result<RcHandle> {
     Ok(close_when_dropped(process_handle))
 }
 
-fn close_when_dropped(handle: HANDLE) -> RcHandle {
+fn close_when_dropped(handle: HANDLE) -> ManagedHandle {
     guard(
         handle,
         |h| if !h.is_invalid() {
@@ -94,13 +90,13 @@ fn find_process_id(process_name: &str) -> Result<Option<u32>> {
 }
 
 fn get_process_name(process_entry: &PROCESSENTRY32W) -> String {
-    String::from_utf16_lossy(&strip_trailing_nulls(process_entry.szExeFile.iter()))
+    String::from_utf16_lossy(strip_trailing_nulls(&process_entry.szExeFile))
 }
 
-fn strip_trailing_nulls(iter: Iter<u16>) -> Vec<u16> {
-    iter.take_while(|&&e| e != 0)
-        .map(|a| a.clone())
-        .collect::<Vec<_>>()
-} 
+fn strip_trailing_nulls(slice: &[u16]) -> &[u16] {
+    let stripped_len = slice.iter().position(|&e| e == 0).unwrap_or(slice.len());
+    &slice[..stripped_len]
+}
 
-type RcHandle = ScopeGuard<HANDLE, fn(HANDLE)>;
+/// A HANDLE that automatically closes itself when dropped.
+type ManagedHandle = ScopeGuard<HANDLE, fn(HANDLE)>;
