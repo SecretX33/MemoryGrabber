@@ -1,15 +1,13 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-use std::os::raw::c_void;
-use anyhow::{bail, Result};
-use scopeguard::{defer, guard, ScopeGuard};
-use System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
-use windows::Win32::*;
-use windows::Win32::System::Diagnostics::ToolHelp::{Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use anyhow::Result;
+use windows::Win32::Foundation::GetLastError;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+
+use crate::util::windows::process::{find_address_from_offset, find_process_id, open_process, strip_trailing_nulls};
+
+mod util;
 
 fn main() -> Result<()> {
     let notepad_name = "notepad.exe";
@@ -17,11 +15,12 @@ fn main() -> Result<()> {
     println!("Notepad ID is {}", notepad_process_id);
 
     let process_handle = open_process(notepad_process_id)?;
+    let address = find_address_from_offset(notepad_process_id, "textinputframework.dll", 0xE83E4)?.unwrap();
+    println!("Address: {:?}", address);
 
     // Read the memory of the notepad process
     let mut buffer = [0u16; 1024];
     let mut bytes_read = 0;
-    let address = 0x27CE0AE02A0 as *const c_void;
 
     let read_memory_successfully = unsafe {
         ReadProcessMemory(
@@ -41,72 +40,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn open_process(process_id: u32) -> Result<ManagedHandle> {
-    let process_handle = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, process_id) }
-        ?.require_valid(&format!("Failed to open process {}. Error: {:?}", process_id, unsafe { GetLastError() }))
-        ?.to_managed();
-    Ok(process_handle)
-}
-
-fn find_process_id(process_name: &str) -> Result<Option<u32>> {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
-        ?.require_valid(&format!("Failed to create process list snapshot. Error: {:?}", unsafe { GetLastError() }))
-        ?.to_managed();
-
-    let mut process_entry = PROCESSENTRY32W::default();
-    process_entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-    let entry_ptr = &mut process_entry as *mut PROCESSENTRY32W;
-
-    if unsafe { Process32FirstW(*snapshot, entry_ptr).as_bool() } {
-        println!("Scanning process snapshot to find process ID of {}", process_name);
-        loop {
-            let name = get_process_name(&process_entry);
-            if name == process_name {
-                println!("Process found: {} (id: {})", name, process_entry.th32ProcessID);
-                return Ok(Some(process_entry.th32ProcessID));
-            }
-            if unsafe { !Process32NextW(*snapshot, entry_ptr).as_bool() } {
-                break;
-            }
-        }
-    }
-
-    return Ok(None);
-}
-
-fn get_process_name(process_entry: &PROCESSENTRY32W) -> String {
-    String::from_utf16_lossy(strip_trailing_nulls(&process_entry.szExeFile))
-}
-
-fn strip_trailing_nulls(slice: &[u16]) -> &[u16] {
-    let stripped_len = slice.iter().position(|&e| e == 0).unwrap_or(slice.len());
-    &slice[..stripped_len]
-}
-
-/// A HANDLE that automatically closes itself when dropped.
-type ManagedHandle = ScopeGuard<HANDLE, fn(HANDLE)>;
-
-trait HandleExt {
-    fn to_managed(&self) -> ManagedHandle;
-    fn require_valid(&self, message: &str) -> Result<&Self>;
-}
-
-impl HandleExt for HANDLE {
-    fn to_managed(&self) -> ManagedHandle {
-        guard(
-            *self,
-            |h| if !h.is_invalid() {
-                unsafe { CloseHandle(h); }
-            },
-        )
-    }
-
-    fn require_valid(&self, error_message: &str) -> Result<&Self> {
-        if self.is_invalid() {
-            bail!(error_message.to_owned());
-        }
-        return Ok(&self)
-    }
 }
