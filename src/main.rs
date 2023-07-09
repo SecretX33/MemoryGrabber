@@ -44,29 +44,16 @@ fn main() -> Result<()> {
 }
 
 fn open_process(process_id: u32) -> Result<ManagedHandle> {
-    let process_handle = unsafe {
-        OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?
-    };
-    if process_handle.is_invalid() {
-        bail!("Failed to open process {}. Error: {:?}", process_id, unsafe { GetLastError() });
-    }
-    Ok(close_when_dropped(process_handle))
-}
-
-fn close_when_dropped(handle: HANDLE) -> ManagedHandle {
-    guard(
-        handle,
-        |h| if !h.is_invalid() {
-            unsafe { CloseHandle(h); }
-        },
-    )
+    let process_handle = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, process_id) }
+        ?.require_valid(&format!("Failed to open process {}. Error: {:?}", process_id, unsafe { GetLastError() }))
+        ?.to_managed();
+    Ok(process_handle)
 }
 
 fn find_process_id(process_name: &str) -> Result<Option<u32>> {
-    let snapshot = close_when_dropped(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? });
-    if snapshot.is_invalid() {
-        bail!("Failed to create process list snapshot. Error: {:?}", unsafe { GetLastError() });
-    }
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        ?.require_valid(&format!("Failed to create process list snapshot. Error: {:?}", unsafe { GetLastError() }))
+        ?.to_managed();
 
     let mut process_entry = PROCESSENTRY32W::default();
     process_entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -100,3 +87,26 @@ fn strip_trailing_nulls(slice: &[u16]) -> &[u16] {
 
 /// A HANDLE that automatically closes itself when dropped.
 type ManagedHandle = ScopeGuard<HANDLE, fn(HANDLE)>;
+
+trait HandleExt {
+    fn to_managed(&self) -> ManagedHandle;
+    fn require_valid(&self, message: &str) -> Result<&Self>;
+}
+
+impl HandleExt for HANDLE {
+    fn to_managed(&self) -> ManagedHandle {
+        guard(
+            *self,
+            |h| if !h.is_invalid() {
+                unsafe { CloseHandle(h); }
+            },
+        )
+    }
+
+    fn require_valid(&self, error_message: &str) -> Result<&Self> {
+        if self.is_invalid() {
+            bail!(error_message.to_owned());
+        }
+        return Ok(&self)
+    }
+}
