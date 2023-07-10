@@ -5,17 +5,17 @@ use anyhow::Result;
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 
-use crate::util::windows::process::{find_address_from_offset, find_process_id, open_process, strip_trailing_nulls};
+use crate::util::windows::process::{find_multilevel_pointer_from_offsets, find_process_id, open_process, strip_trailing_nulls};
 
 mod util;
 
 fn main() -> Result<()> {
-    let notepad_name = "notepad.exe";
-    let notepad_process_id = find_process_id(notepad_name)?.expect(&format!("{} is not running", notepad_name));
-    println!("Notepad ID is {}", notepad_process_id);
+    let mpc_name = "mpc-hc64.exe";
+    let process_id = find_process_id(mpc_name)?.expect(&format!("{} is not running", mpc_name));
+    println!("Notepad ID is {}", process_id);
 
-    let process_handle = open_process(notepad_process_id)?;
-    let address = find_address_from_offset(notepad_process_id, "textinputframework.dll", 0xE83E4)?.unwrap();
+    let process_handle = open_process(process_id)?;
+    let address = find_multilevel_pointer_from_offsets(process_id, &process_handle, "mpc-hc64.exe", &vec![0x0079A8E0, 0x1F0, 0x2C8, 0x20, 0x38])?.unwrap();
     println!("Address: {:?}", address);
 
     // Read the memory of the notepad process

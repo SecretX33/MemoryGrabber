@@ -1,10 +1,14 @@
 use std::ffi::c_void;
+use std::mem::size_of;
+use std::ops::{Deref, DerefMut};
+use std::ptr;
+
 use anyhow::{bail, Result};
 use scopeguard::{guard, ScopeGuard};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
-use crate::util::windows::string::ToPCWSTRWrapper;
 
 pub fn open_process(process_id: u32) -> Result<ManagedHandle> {
     let process_handle = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, process_id) }
@@ -19,7 +23,7 @@ pub fn find_process_id(process_name: &str) -> Result<Option<u32>> {
         ?.to_managed();
 
     let mut process_entry = PROCESSENTRY32W::default();
-    process_entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    process_entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
     let entry_ptr = &mut process_entry as *mut PROCESSENTRY32W;
 
     if unsafe { Process32FirstW(*snapshot, entry_ptr).as_bool() } {
@@ -43,6 +47,48 @@ pub fn get_process_name(process_entry: &PROCESSENTRY32W) -> String {
     String::from_utf16_lossy(strip_trailing_nulls(&process_entry.szExeFile))
 }
 
+pub fn find_multilevel_pointer_from_offsets(
+    process_id: u32,
+    process_handle: &ManagedHandle,
+    module_name: &str,
+    offsets: &[isize]
+) -> Result<Option<*const c_void>> {
+    if offsets.is_empty() {
+        return Ok(None)
+    }
+
+    let address = find_address_from_offset(process_id, module_name, offsets[0])?;
+    if address.is_none() || offsets.len() < 2 {
+        return Ok(address);
+    }
+
+    let final_address = offsets.iter().skip(1)
+        .fold(address, |acc, &offset|
+            acc.and_then(|p| {
+                println!("Digging into pointer {:?}, currently at {:?}, applying offset {}", address, p, offset);
+                let temp_pointer = ptr::null_mut::<c_void>();
+                unsafe {
+                    ReadProcessMemory(
+                        **process_handle,
+                        p,
+                        temp_pointer,
+                        size_of::<c_void>(),
+                        None,
+                    );
+                }
+                println!("New pointer is {:?}", temp_pointer);
+
+                if temp_pointer.is_null() {
+                    return None
+                }
+                Some(temp_pointer.wrapping_offset(offset).cast_const())
+            })
+        );
+
+    println!("Dug into pointer {:?}, final address is {:?}", address, final_address);
+    Ok(final_address)
+}
+
 pub fn find_address_from_offset(process_id: u32, module_name: &str, offset: isize) -> Result<Option<*const c_void>> {
     let base_address = find_module_base_address(process_id, module_name)?;
     Ok(base_address.map(|p| p.wrapping_offset(offset)))
@@ -54,7 +100,7 @@ pub fn find_module_base_address(process_id: u32, module_name: &str) -> Result<Op
         ?.to_managed();
 
     let mut module_entry = MODULEENTRY32W::default();
-    module_entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+    module_entry.dwSize = size_of::<MODULEENTRY32W>() as u32;
     let entry_ptr = &mut module_entry as *mut MODULEENTRY32W;
 
     if unsafe { Module32FirstW(*snapshot, entry_ptr).as_bool() } {
@@ -89,7 +135,22 @@ pub fn strip_trailing_nulls(slice: &[u16]) -> &[u16] {
 }
 
 /// A HANDLE that automatically closes itself when dropped.
-pub type ManagedHandle = ScopeGuard<HANDLE, fn(HANDLE)>;
+#[derive(Debug)]
+pub struct ManagedHandle(ScopeGuard<HANDLE, fn(HANDLE)>);
+
+impl Deref for ManagedHandle {
+    type Target = HANDLE;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ManagedHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 pub trait HandleExt {
     fn to_managed(&self) -> ManagedHandle;
@@ -98,12 +159,12 @@ pub trait HandleExt {
 
 impl HandleExt for HANDLE {
     fn to_managed(&self) -> ManagedHandle {
-        guard(
+        ManagedHandle(guard(
             *self,
             |h| if !h.is_invalid() {
                 unsafe { CloseHandle(h); }
             },
-        )
+        ))
     }
 
     fn require_valid(&self, error_message: &str) -> Result<&Self> {
